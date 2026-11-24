@@ -1,0 +1,351 @@
+> **Kısım V · Yöntem.** Her yeni programda izleyeceğin sıra, exploit çalışmadığında ne yapacağın, ve Binary Ninja ile keşif.
+
+
+# Bölüm 20: Her programda izleyeceğin sıra
+
+## Bu bölümde
+
+Dokuz örneğin hepsi aynı iskeletle çözüldü, sadece her seferinde iskeletin bir parçası daha önemli hale geldi. Bu bölüm o iskeleti, yeni bir programla karşılaştığında baştan sona uygulayabileceğin bir kontrol listesine çeviriyor. Kitabı bitirdiğinde geri dönüp bakacağın sayfa büyük ihtimalle bu.
+
+**Ön koşullar:** Kısım III ve IV.
+
+**Bu bölümün sonunda:**
+
+- Yeni bir programda keşiften exploit'e kadar altı adımı sırayla uygulayabileceksin.
+- `checksec` çıktısından bir saldırı planı tablosu çıkarabileceksin.
+- Bir exploit'i yerelde ve uzakta aynı betikle çalıştırabileceksin.
+
+## 1. Keşif: çalıştırmadan önce
+
+```bash
+file ./hedef
+pwn checksec ./hedef
+nm ./hedef | grep ' T '          # stripped değilse
+strings -n 6 ./hedef | less      # "flag", "/bin/sh", hata mesajları
+```
+
+`checksec`'ten bir saldırı planı çıkar:
+
+| `checksec` diyor ki | O zaman | Bölüm |
+|---|---|---|
+| Canary yok | Doğrudan dönüş adresine yazabilirsin. | 9 |
+| Canary var | Ya sızdır, ya canary'den önceki bir değişkeni hedefle. | 17 |
+| NX yok / Stack: Executable | Shellcode bir seçenek. | 11 |
+| NX var | ROP. | 12 |
+| PIE yok | Programın adresleri sabit: gadget'lar, `win`, GOT, PLT. | 10, 15 |
+| PIE var | Bir program adresi sızdır ya da sadece libc kullan. | 18, 19 |
+| Partial RELRO | GOT'a yazmak bir seçenek. | 14, 16 |
+| Full RELRO | GOT'a yazamazsın, okuyabilirsin. | 14 |
+
+## 2. Hatayı bul
+
+Binary Ninja'da (Bölüm 22) ya da `objdump`'ta:
+
+- **Taşma:** `read`, `fgets`, `memcpy`, `strcpy`, `gets`, `scanf("%s")`. Her birinin buffer'ının boyutunu, okunan/kopyalanan boyutla karşılaştır.
+- **Format string:** `printf` ailesinde ilk argüman sabit bir metin mi, yoksa bir değişken mi?
+- **Sınır hatası:** Döngülerde `<=` yerine `<` gibi bir eksik. Tek baytlık taşmalar da (off-by-one) sömürülebilir.
+
+## 3. Ölç
+
+- **Buffer'ın yeri:** `lea rax,[rbp-X]` ya da `lea rdi,[rsp+X]`.
+- **Hedefin yeri:** dönüş adresi `[rbp+8]`, canary `[rbp-8]`, ya da `cmp` edilen bir değişken.
+- **Mesafe:** iki yoldan. Biri assembly'den, biri desenle (`cyclic`). Üçüncü sağlama Binary Ninja'nın `var_` isimleri.
+
+## 4. Planı yaz
+
+Exploit'i yazmadan önce yığının son halini **kâğıda çiz.** Her 8 baytlık satıra ne koyacağını yaz:
+
+```text
+[ dolgu ............ ]  72 bayt
+[ canary            ]  sızıntı 1
+[ BBBBBBBB          ]  kaydedilmiş rbp
+[ pop rdi ; ret     ]  libc + ...
+[ "/bin/sh"         ]  libc + ...
+[ ret               ]  hizalama
+[ system            ]  libc + 0x51030
+```
+
+Bu adımı atlarsan, bir şey çalışmadığında hatanın nerede olduğunu bulamazsın. Bölüm 19'daki savaş planı tablosu da bu adımın parçası.
+
+## 5. Sızıntıyı ayrı çalıştır
+
+Exploit'i parça parça kur. Önce sadece sızıntıyı yaz ve sızan değerleri ekrana bas. Kontrol et:
+
+- Taban `000` ile bitiyor mu?
+- Canary `00` ile bitiyor mu?
+- Değerler doğru mahallede mi (Bölüm 3)?
+
+Bunlar tutmadan ikinci aşamaya geçme.
+
+## 6. Yerelde çalıştır, sonra uzağa
+
+pwntools iskeleti aynı kodu iki yerde çalıştırabilir:
+
+```python
+from pwn import *
+import sys
+
+context.arch = "amd64"
+e = ELF("./hedef", checksec=False)
+
+if "REMOTE" in sys.argv:
+    p = remote("sunucu.ornek", 1337)
+else:
+    p = process(e.path)
+
+# ... exploit ...
+p.interactive()
+```
+
+`python3 x.py` yerelde, `python3 x.py REMOTE` uzakta çalışır. Uzaktaki sunucunun libc'si farklıysa offset'leri görevle verilen libc dosyasından al (Bölüm 15).
+
+## Kontrol soruları
+
+1. `checksec` "Canary found, NX enabled, No PIE" diyorsa saldırı planın ne olur?
+2. Mesafeyi neden en az iki yoldan ölçüyoruz?
+3. Sızıntıyı neden exploit'in geri kalanından ayrı test ediyoruz?
+
+## Alıştırmalar
+
+1. **Kendin yap.** Kitaptaki dokuz örneğin her biri için 1. adımdaki planı tek satırla yaz. Kitaptaki çözümle karşılaştır.
+2. **Kendin yap.** `e05_libc_x.py`'yi `REMOTE` desteği olacak şekilde düzenle. `socat TCP-LISTEN:1337,reuseaddr,fork EXEC:./e05_libc` ile programı yerelde bir sunucu gibi çalıştırıp `remote("127.0.0.1", 1337)` ile dene.
+
+## Özet
+
+- Keşif → hata → ölçüm → plan → sızıntı → exploit.
+- `checksec` bir plan tablosudur.
+- Mesafeyi iki yoldan ölç, yığını kâğıda çiz.
+- Sızıntıyı ayrı doğrula: `000`, `00`, doğru mahalle.
+
+---
+**Kontrol sorularının cevapları**
+
+1. Canary'yi sızdırmak (ya da canary'den önceki bir değişkeni hedeflemek), sonra programın sabit adresleriyle ROP (`win`'e ya da `puts@plt` ile libc sızıntısına).
+2. Tek bir yöntem yanılabilir: assembly'de gözden kaçan bir dolgu ya da desende yanlış okunan bir bayt.
+3. Sızıntı yanlışsa ikinci aşamanın neden çalışmadığını anlamak imkânsızlaşır. Önce temeli doğrula.
+
+
+# Bölüm 21: Exploit çalışmadığında
+
+## Bu bölümde
+
+Exploit'lerin çoğu ilk denemede çalışmaz. Bu normal. Önemli olan neden çalışmadığını hızlı bulmak. Bu bölüm en sık karşılaşılan belirtileri ve sebeplerini bir tabloda topluyor, sonra çöken bir programı sonradan incelemenin iki yolunu gösteriyor. Tablodaki hataların hepsi bu kitabı hazırlarken gerçekten yaşandı.
+
+**Ön koşullar:** Kısım III ve IV.
+
+**Bu bölümün sonunda:**
+
+- Bir exploit'in başarısızlık belirtisinden en olası sebebi tahmin edebileceksin.
+- Çöken bir programın core dosyasını pwntools ile okuyup çöktüğü komutu ve `rsp`'yi gösterebileceksin.
+- İki aşamalı bir exploit'i `gdb.debug` ile adım adım izleyebileceksin.
+
+## Belirti tablosu
+
+| Belirti | Büyük ihtimalle | Kontrol et |
+|---|---|---|
+| Çıkış kodu 139, `ret`'te çöküyor | Dönüş adresi kanonik değil: mesafe ya da paketleme yanlış | `x/gx $rsp` |
+| SIGSEGV, `movaps`'ta | Yığın hizalaması | Zincire `ret` ekle ya da çıkar |
+| `*** stack smashing detected ***` | Canary bozuldu | Mesafe canary'den önce mi bitiyor? Canary doğru mu sızdı? |
+| `*** buffer overflow detected ***` | FORTIFY açık | `checksec`'te `FORTIFY` satırına bak |
+| Çıkış kodu 0, hiçbir şey yazmadı | Çıktı tamponda kaldı, ya da `win`'e ulaşılmadı | `setvbuf` var mı? |
+| `EOFError` | Program öldü, sen hâlâ okuyorsun | `p.poll()` ile çıkış koduna bak |
+| Sızıntı yarım geldi (`0x4110`) | Adreste `0x0a` vardı, `recvline` kesti | `recvuntil(sonraki_metin, drop=True)` |
+| Kabuk açıldı ama cevap vermiyor | Komut payload'la aynı `read`'e gitti | `ljust(n)` |
+| gdb'de çalışıyor, dışarıda çalışmıyor | Yığın adresleri ortam yüzünden kaydı | Sabit yığın adresi kullanma |
+| Bazen çalışıyor | Sızan adreste `00`/`0a` var ya da ASLR'ye bağlı bir varsayım | 20 kere çalıştır, oranı gör |
+| `pack(): number does not fit within word_size` | pwntools 32 bit sanıyor | `context.arch = "amd64"` |
+| `AttributeError: puts` (`e.plt.puts`) | `unicorn` kurulu değil | PLT adresini `objdump` ile bul |
+
+## Core dosyası: çökeni sonradan incelemek
+
+Exploit bir yerde çöküyor ama göremiyorsan, çekirdeğe programın son halini bir dosyaya yazdırırsın. Buna **core dump** denir. pwntools bu dosyayı okuyabilir. Bölüm 15'teki hizalamasız zinciri böyle teşhis ettik:
+
+```bash
+ulimit -c unlimited
+```
+
+```python
+# ... Bölüm 15'teki exploit, ret olmadan ...
+p.wait()
+core = p.corefile
+print("rip   =", hex(core.rip))
+print("rsp   =", hex(core.rsp), "rsp % 16 =", core.rsp % 16)
+print("komut =", disasm(core.read(core.rip, 8), vma=core.rip, arch="amd64").splitlines()[0])
+```
+
+```text
+puts  = 0x7234c533e110
+libc  = 0x7234c52c3000
+rip   = 0x7234c5313d1b
+rsp   = 0x7fff4fcecb48 rsp % 16 = 8
+komut =     7234c5313d1b:       0f 29 44 24 50          movaps XMMWORD PTR [rsp+0x50], xmm0
+```
+
+- Çöken komut `movaps`.
+- `rsp % 16 = 8`: hizasız.
+- `rip − taban = 0x50d1b`: `do_system` içindeki `movaps`.
+
+Tahmin yok, kanıt var. `ulimit -c unlimited` sadece o terminal oturumu için geçerli. Core dosyaları birkaç MB tutar, işin bitince sil. Bu makinede core dosyaları programın çalıştığı dizine `core.PID` adıyla düşüyor (`/proc/sys/kernel/core_pattern` = `core`).
+
+## pwntools içinden gdb
+
+İki aşamalı exploit'lerde `r < dosya` işe yaramaz, çünkü ikinci aşama birinci aşamanın çıktısına bağlı. pwntools programı doğrudan gdb altında başlatabilir:
+
+```python
+context.terminal = ["urxvt", "-e", "sh", "-c"]
+p = gdb.debug(e.path, gdbscript="""
+b *vuln
+c
+""")
+```
+
+`gdb.debug` yeni bir terminal penceresi açar ve programı orada gdb altında başlatır. Betiğin programla konuşmaya devam eder, sen diğer pencerede istediğin yerde durup bakarsın.
+
+> [!NOTE]
+> **ptrace notu:** `ptrace_scope` 1 iken `gdb -p PID` ile çalışan bir programa dışarıdan bağlanamazsın, çünkü gdb o programın atası değil. `gdb.debug` bu sorunu yaşamaz: programı gdb tarafı başlatıyor.
+
+> [!NOTE]
+> **Terminal notu:** Yukarıdaki `context.terminal` satırı urxvt için. Bu kitabı hazırlarken pencere açılamayan bir ortamda çalıştığımız için bu satırı deneyemedik. Pencere açılmazsa önce `urxvt -e sh -c "echo deneme; sleep 3"` komutunun kendi başına çalıştığını kontrol et.
+
+## Genel yöntem
+
+1. **Hipotez kur.** "Mesafe yanlış" ya da "canary yanlış sızıyor".
+2. **En küçük deneyi yap.** Bütün exploit'i değil, sadece o hipotezi test eden parçayı çalıştır.
+3. **Beklentiyle karşılaştır.** Ne bekliyordun, ne çıktı?
+4. **Tek seferde tek bir şeyi değiştir.**
+
+Rastgele değişiklik yapıp sonucu beklemek, en çok vakit kaybettiren yöntem.
+
+## Kontrol soruları
+
+1. Program `movaps`'ta çöktü. İlk denemen ne olur?
+2. `EOFError` aldın. İlk bakacağın şey ne?
+3. Core dosyasından hangi üç bilgi, çöküşün sebebini kanıtlamaya yetti?
+
+## Alıştırmalar
+
+1. **Kendin yap.** `e05_libc_x.py`'deki `ret`'i kaldırıp core dosyası yöntemini kendin uygula. Senin makinende de `0x50d1b` mi çıkıyor?
+2. **Kendin yap.** `e07_canary_x.py`'de canary'yi bilerek 1 artır. Hangi belirtiyi görüyorsun? Tablodaki hangi satıra denk geliyor?
+
+## Özet
+
+- Belirti tablosu, hatanın büyük kısmını tek bakışta daraltır.
+- Core dump + `p.corefile`, çöken komutu ve yazmaçları sonradan verir.
+- `gdb.debug`, iki aşamalı exploit'leri izlemenin yolu.
+- Hipotez, en küçük deney, karşılaştırma, tek değişiklik.
+
+---
+**Kontrol sorularının cevapları**
+
+1. Hedef fonksiyonun adresinden önce bir `ret` gadget'ı eklemek (ya da varsa çıkarmak).
+2. `p.poll()` ile programın çıkış koduna: hangi sinyalle öldü?
+3. Çöken komut (`movaps`), `rsp % 16` (8) ve `rip`'in libc içindeki offset'i (`0x50d1b`).
+
+
+# Bölüm 22: Binary Ninja ile keşif
+
+## Bu bölümde
+
+Kitap boyunca `objdump` ve gdb kullandık, çünkü ne olduğunu en çıplak haliyle görmek istedik. Gerçek bir hedefte ise ilk açacağın araç Binary Ninja olmalı: bir fonksiyonun ne yaptığını assembly'den satır satır çözmek yerine, C'ye benzer bir görünümde birkaç saniyede okursun. Bu bölüm, kitaptaki adımların Binary Ninja'daki karşılıklarını topluyor.
+
+**Ön koşullar:** Bölüm 6 (Binary Ninja'ya giriş), Bölüm 20.
+
+**Bu bölümün sonunda:**
+
+- Binary Ninja'nın dört görünümü arasında amaca göre geçiş yapabileceksin.
+- Tehlikeli çağrıları çapraz referanslarla bulabileceksin.
+- `var_XX` isimlerinden mesafe hesaplayabileceksin.
+- HLIL'de canary kontrolünü tanıyabileceksin.
+
+## Görünümler
+
+| Görünüm | Ne zaman |
+|---|---|
+| **Disassembly** | Tam komutlar ve adresler. `objdump`'ın karşılığı. Gadget ve offset ararken. |
+| **LLIL / MLIL** | Komutların sadeleşmiş hali. Yazmaçlar ve bellek işlemleri daha okunur. |
+| **HLIL** | C'ye benzer görünüm. Hatayı bulmanın en hızlı yolu. |
+| **Graph** | Fonksiyonun dallanmaları kutular ve oklar halinde. `cmp`/`jne` karar noktaları için. |
+
+Önce HLIL'de oku ve ne yaptığını anla. Sonra şüpheli satırı Disassembly'de bul ve adresleri oradan al.
+
+## Tehlikeli çağrıları bulmak
+
+1. Sol paneldeki **Symbols** listesinde içe aktarılan fonksiyonlara bak: `read`, `gets`, `strcpy`, `printf`...
+2. Birinin üstüne gel, **`x`**'e bas (Cross References). Onu çağıran her yer listelenir.
+3. Her çağrıya git, HLIL'de argümanlarına bak.
+
+`e07_canary`'de `printf` çağrılarına bakarsan, birinin argümanı sabit bir metin (`"merhaba "`), diğerininki bir yığın değişkeni olur. **Biçim metni sabit değilse format string hatası var.**
+
+## Yığın değişkenleri ve mesafe
+
+Binary Ninja yığın değişkenlerine, fonksiyona girildiği andaki `rsp`'ye (yani dönüş adresinin durduğu yere) göre isim verir:
+
+| Program | Buffer | Diğer | Mesafe |
+|---|---|---|---|
+| `e01_admin` | `var_28` (`name`) | `var_18` (`admin`) | `0x28 − 0x18 = 16` |
+| `e02_win` | `var_28` (`buf`) | dönüş adresi | `0x28 = 40` |
+| `e03_shell` | `var_88` (`buf`) | dönüş adresi | `0x88 = 136` |
+| `e07_canary` | `var_58` (`buf`) | `var_10` (canary) | `0x58 − 0x10 = 72` |
+
+Kitapta gdb ve desenle bulduğumuz her mesafe bu çıkarmalarla aynı. Tablodaki isimler, assembly'deki `[rbp-X]` adreslerinden hesaplandı (`var_` = X + 8). Binary Ninja'nın senin sürümünde gösterdiği isimler farklı olabilir. Bir değişkenin tam yerini görmek için **Stack View** penceresine bak.
+
+Bir değişkenin tipini değiştirmek için `y`, adını değiştirmek için `n`. Her anladığın değişkene isim ver. Bir saat sonra döndüğünde nerede kaldığını hatırlarsın.
+
+## Canary'yi tanımak
+
+Canary'li bir fonksiyonun HLIL görünümünde başta ve sonda şuna benzer satırlar görürsün (temsili):
+
+```c
+void* fsbase
+int64_t rax = *(fsbase + 0x28)
+...
+if (rax != *(fsbase + 0x28))
+    __stack_chk_fail()
+```
+
+`fsbase + 0x28`, Bölüm 17'deki `fs:0x28`.
+
+## Sembol, metin, gadget
+
+- **Sembol adresi:** fonksiyon adına tıklayınca Disassembly'de görünür. PIE'li bir programda Binary Ninja tabanı varsayılan olarak `0x0` alır, yani gördüğün adres zaten offset. `nm`'in gösterdiğiyle aynı.
+- **Metin aramak:** Strings paneli. `"/bin/sh"`, `"flag"` gibi metinleri ve onları kullanan yerleri bulursun.
+- **Gadget:** Binary Ninja'nın kendisinde hazır bir gadget arayıcı yok, eklentiler var. `ROPgadget` ya da pwndbg'de `rop` daha hızlı.
+
+## Önerilen düzen
+
+1. Binary Ninja'da aç. `main`'den başla, HLIL'de oku.
+2. Kullanıcı girdisinin nereye gittiğini takip et. Değişkenlere isim ver.
+3. Hatayı bul. Mesafeyi `var_` isimlerinden hesapla.
+4. Karşılaştırılan sabitleri, ilginç fonksiyonları not al.
+5. gdb'ye geç: mesafeyi desenle doğrula, sızıntı yuvalarını bul.
+6. Exploit'i pwntools ile yaz.
+
+## Kontrol soruları
+
+1. Bir buffer'ın adı `var_48` ise dönüş adresine mesafe kaç?
+2. Assembly'de `[rbp-0x50]` olan bir değişken Binary Ninja'da nasıl adlandırılır?
+3. Bir `printf` çağrısının format string hatası olup olmadığını HLIL'de nasıl anlarsın?
+
+## Alıştırmalar
+
+1. **Gözlemle.** Dokuz örneği Binary Ninja'da aç, tabloyu kendin doldur. `e04_rop`, `e05_libc`, `e06_fmt`, `e08_pie`, `e09_full` için de satır ekle.
+2. **Kendin yap.** `e06_fmt`'te `hedef`'e giden her referansı `x` ile bul.
+3. **Kendin yap.** `e09_full`'ün `vuln`'ünde değişkenlere isim ve tip ver: `buf`, `n`, `canary`. HLIL nasıl değişti?
+
+## Özet
+
+- Önce HLIL'de anla, sonra Disassembly'de adres al.
+- `x` (çapraz referans) tehlikeli çağrıları bulmanın en hızlı yolu.
+- `var_XX` = dönüş adresine uzaklık. İki ismin farkı, iki değişken arasındaki mesafe.
+- `fsbase + 0x28` ve `__stack_chk_fail`: canary.
+
+---
+**Kontrol sorularının cevapları**
+
+1. `0x48` = 72.
+2. `var_58` (`0x50 + 8`).
+3. İlk argümanı sabit bir metin değil, bir değişken ya da yığın adresiyse.
+
+---
+
+[← 10-pie-ve-hepsi-bir-arada](10-pie-ve-hepsi-bir-arada.md) · [İçindekiler](README.md) · [12-bundan-sonra-ve-ekler →](12-bundan-sonra-ve-ekler.md)
